@@ -79,33 +79,160 @@ def format_uptime(seconds):
     else:
         return f"{secs}s"
 
-def get_network_stats():
+def get_metrics():
     try:
-        # Take the first snapshot
-        initial_stats = psutil.net_io_counters(pernic=True)
-        # Wait for 1 second
-        time.sleep(1)
-        # Take the second snapshot
-        later_stats = psutil.net_io_counters(pernic=True)
+        # For CPU usage, take snapshots without blocking
+        per_core_usage = psutil.cpu_percent(interval=0, percpu=True)
+        overall_cpu = sum(per_core_usage) / len(per_core_usage) if per_core_usage else 0
+        
+        # Check if sensors_temperatures is available; otherwise, use "N/A"
+        temps = psutil.sensors_temperatures() if hasattr(psutil, 'sensors_temperatures') else {}
+        main_temp = (
+            temps.get('coretemp', [{}])[0].current
+            if temps.get('coretemp') and 'current' in temps.get('coretemp', [{}])[0]
+            else 'N/A'
+        )
+        
+        # Memory metrics
+        mem = psutil.virtual_memory()
+        
+        # Disk metrics (using the root partition)
+        disk = psutil.disk_usage('/')
+        
+        # CPU info using platform.uname() for a potentially more descriptive model
+        uname = platform.uname()
+        cpu_info = {
+            'model': uname.processor or 'Unknown',
+            'speed': psutil.cpu_freq().current if psutil.cpu_freq() else None,
+            'cores': {
+                'physical': psutil.cpu_count(logical=False),
+                'logical': psutil.cpu_count(logical=True)
+            }
+        }
+        
+        # Network stats - using global monitoring state
+        network_info = get_network_stats()
+        
+        # GPU details 
+        gpu_info = get_gpu_details()
+        
+        # Uptime
+        uptime_seconds = int(time.time() - psutil.boot_time())
+        
+        # System info with python version info
+        system_info = {
+            'hostname': platform.node(),
+            'platform': platform.system(),
+            'arch': platform.machine(),
+            'release': platform.release(),
+            'pythonVersion': sys.version
+        }
+        
+        # Compile complete metrics
+        result = {
+            'cpu': {
+                'usage': float(f"{overall_cpu:.2f}"),
+                'temperature': main_temp,
+                'cores': cpu_info['cores'],
+                'model': cpu_info['model'],
+                'per_core': [float(f"{c:.2f}") for c in per_core_usage],
+                'frequency': {
+                    'current': cpu_info['speed']
+                }
+            },
+            'memory': {
+                'total': mem.total,
+                'used': mem.used,
+                'free': mem.free,
+                'available': mem.available,
+                'usedPercent': float(f"{mem.percent:.2f}"),
+                'buffers': getattr(mem, 'buffers', 0),
+                'cached': getattr(mem, 'cached', 0)
+            },
+            'swap': {
+                'total': psutil.swap_memory().total,
+                'used': psutil.swap_memory().used,
+                'free': psutil.swap_memory().free,
+                'usedPercent': float(f"{psutil.swap_memory().percent:.2f}")
+            },
+            'disk': {
+                'total': disk.total,
+                'used': disk.used,
+                'free': disk.free,
+                'usedPercent': float(f"{disk.percent:.2f}")
+            },
+            'gpu': gpu_info,
+            'network': network_info,
+            'uptime': {
+                'seconds': uptime_seconds,
+                'formatted': format_uptime(uptime_seconds)
+            },
+            'system': system_info,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+        
+        log_debug("Collected system metrics", "METRICS", result)
+        return result
+    except Exception as e:
+        log_error(f"Error getting metrics: {str(e)}", "METRICS", {'stack': str(e)})
+        return None
+
+# Global variables to track network usage between calls
+last_net_io = None
+last_net_time = None
+
+# Corrected network stats function - uses global state to track between calls
+def get_network_stats():
+    global last_net_io, last_net_time
+    
+    try:
+        current_time = time.time()
+        current_net_io = psutil.net_io_counters(pernic=True)
         
         network_stats = []
-        for iface, later in later_stats.items():
-            if iface in initial_stats:
-                initial = initial_stats[iface]
-                # Calculate difference (bytes per second)
-                rx_sec = later.bytes_recv - initial.bytes_recv
-                tx_sec = later.bytes_sent - initial.bytes_sent
+        
+        # If we have previous measurements, calculate the rates
+        if last_net_io is not None and last_net_time is not None:
+            time_delta = current_time - last_net_time
+            
+            for iface, current in current_net_io.items():
+                if iface in last_net_io:
+                    prev = last_net_io[iface]
+                    
+                    # Calculate bytes per second
+                    rx_sec = (current.bytes_recv - prev.bytes_recv) / time_delta
+                    tx_sec = (current.bytes_sent - prev.bytes_sent) / time_delta
+                    
+                    network_stats.append({
+                        'interface': iface,
+                        'rx_bytes': current.bytes_recv,
+                        'tx_bytes': current.bytes_sent,
+                        'rx_sec': round(rx_sec, 2),
+                        'tx_sec': round(tx_sec, 2),
+                        'rx_packets': current.packets_recv,
+                        'tx_packets': current.packets_sent,
+                        'rx_errors': current.errin,
+                        'tx_errors': current.errout
+                    })
+        else:
+            # First run, just record interfaces with zero rates
+            for iface, current in current_net_io.items():
                 network_stats.append({
                     'interface': iface,
-                    'rx_bytes': later.bytes_recv,
-                    'tx_bytes': later.bytes_sent,
-                    'rx_sec': rx_sec,
-                    'tx_sec': tx_sec,
-                    'rx_packets': later.packets_recv,
-                    'tx_packets': later.packets_sent,
-                    'rx_errors': later.errin,
-                    'tx_errors': later.errout
+                    'rx_bytes': current.bytes_recv,
+                    'tx_bytes': current.bytes_sent,
+                    'rx_sec': 0,
+                    'tx_sec': 0,
+                    'rx_packets': current.packets_recv,
+                    'tx_packets': current.packets_sent,
+                    'rx_errors': current.errin,
+                    'tx_errors': current.errout
                 })
+        
+        # Update the global state for next call
+        last_net_io = current_net_io
+        last_net_time = current_time
+        
         return network_stats
     except Exception as e:
         log_error(f"Error getting network stats: {str(e)}", 'NETWORK', {'stack': str(e)})
@@ -154,101 +281,6 @@ def get_gpu_details():
         log_error(f"Error getting GPU details: {str(e)}", "GPU", {'stack': str(e)})
         return []
 
-def get_metrics():
-    try:
-        # Measure overall and per-core CPU usage in one go
-        overall_cpu = psutil.cpu_percent(interval=1)
-        per_core_usage = psutil.cpu_percent(interval=0, percpu=True)  # immediate reading after overall
-        
-        # Check if sensors_temperatures is available; otherwise, use "N/A"
-        temps = psutil.sensors_temperatures() if hasattr(psutil, 'sensors_temperatures') else {}
-        main_temp = (
-            temps.get('coretemp', [{}])[0].current
-            if temps.get('coretemp') and 'current' in temps.get('coretemp', [{}])[0]
-            else 'N/A'
-        )
-        
-        # Memory metrics
-        mem = psutil.virtual_memory()
-        
-        # Disk metrics (using the root partition)
-        disk = psutil.disk_usage('/')
-        
-        # CPU info using platform.uname() for a potentially more descriptive model
-        uname = platform.uname()
-        cpu_info = {
-            'model': uname.processor or 'Unknown',
-            'speed': psutil.cpu_freq().current if psutil.cpu_freq() else None,
-            'cores': {
-                'physical': psutil.cpu_count(logical=False),
-                'logical': psutil.cpu_count(logical=True)
-            }
-        }
-        
-        # GPU details and network stats
-        gpu_info = get_gpu_details()
-        network_info = get_network_stats()
-        
-        # Uptime
-        uptime_seconds = int(time.time() - psutil.boot_time())
-        
-        # System info with python version info
-        system_info = {
-            'hostname': platform.node(),
-            'platform': platform.system(),
-            'arch': platform.machine(),
-            'release': platform.release(),
-            'pythonVersion': sys.version
-        }
-        
-        # Compile complete metrics
-        result = {
-            'cpu': {
-                'usage': float(f"{overall_cpu:.2f}"),
-                'temperature': main_temp,
-                'cores': cpu_info['cores'],
-                'model': cpu_info['model'],
-                'per_core': [float(f"{c:.2f}") for c in per_core_usage],
-                'frequency': {
-                    'current': cpu_info['speed']
-                }
-            },
-            'memory': {
-                'total': mem.total,
-                'used': mem.used,
-                'free': mem.free,
-                'available': mem.available,
-                'usedPercent': float(f"{mem.percent:.2f}"),
-                'buffers': 0,   # Not exposed by psutil on all systems
-                'cached': 0
-            },
-            'swap': {
-                'total': psutil.swap_memory().total,
-                'used': psutil.swap_memory().used,
-                'free': psutil.swap_memory().free,
-                'usedPercent': float(f"{psutil.swap_memory().percent:.2f}")
-            },
-            'disk': {
-                'total': disk.total,
-                'used': disk.used,
-                'free': disk.free,
-                'usedPercent': float(f"{disk.percent:.2f}")
-            },
-            'gpu': gpu_info,
-            'network': network_info,
-            'uptime': {
-                'seconds': uptime_seconds,
-                'formatted': format_uptime(uptime_seconds)
-            },
-            'system': system_info,
-            'timestamp': datetime.datetime.now().isoformat()
-        }
-        
-        log_debug("Collected system metrics", "METRICS", result)
-        return result
-    except Exception as e:
-        log_error(f"Error getting metrics: {str(e)}", "METRICS", {'stack': str(e)})
-        return None
 
 def get_processes():
     try:
