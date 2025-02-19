@@ -1,0 +1,16 @@
+2025-02-19 23:20:49.560 [INFO] [STARTUP] Server started on port 3000
+{
+  "nodeVersion": "v20.12.0",
+  "platform": "darwin",
+  "arch": "x64",
+  "hostname": "MacBook-Air-2.local",
+  "cpus": 4,
+  "memory": "8 GB",
+  "ip": "192.168.31.151"
+}
+2025-02-19 23:21:15.267 [INFO] [SOCKET] Client connected from ::1 with session ID AEVsBsOt9gNCDwCGAAAB
+2025-02-19 23:21:15.279 [INFO] [SOCKET] Data requested for server 1 from client AEVsBsOt9gNCDwCGAAAB
+2025-02-19 23:21:20.897 [INFO] [SOCKET] Client disconnected: AEVsBsOt9gNCDwCGAAAB
+2025-02-19 23:21:21.037 [INFO] [SOCKET] Client connected from ::1 with session ID F2N81beSJqJllyF8AAAD
+2025-02-19 23:21:21.046 [INFO] [SOCKET] Data requested for server 1 from client F2N81beSJqJllyF8AAAD
+2025-02-19 23:21:41.637 [INFO] [SOCKET] Client disconnected: F2N81beSJqJllyF8AAAD
