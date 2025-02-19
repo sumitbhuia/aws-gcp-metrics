@@ -243,25 +243,28 @@ def get_gpu_details():
         # Try using GPUtil first
         gpus = GPUtil.getGPUs()
         gpu_details = []
+        
         if gpus:
             for gpu in gpus:
+                # Calculate VRAM utilization safely with proper error handling
                 vram_utilization = None
-                if gpu.memoryTotal and gpu.memoryUsed:
+                if gpu.memoryTotal and gpu.memoryTotal > 0:
                     vram_utilization = float(f"{(gpu.memoryUsed / gpu.memoryTotal * 100):.2f}")
+                
                 gpu_details.append({
                     'index': gpu.id,
-                    'model': gpu.name,
-                    'vendor': 'N/A',  # GPUtil may not provide vendor info
+                    'model': gpu.name if gpu.name else 'Unknown',
+                    'vendor': 'NVIDIA' if 'nvidia' in gpu.name.lower() else 'Unknown',
                     'bus': 'N/A',
                     'vram': {
                         'total': gpu.memoryTotal,
                         'used': gpu.memoryUsed,
-                        'free': gpu.memoryFree,
+                        'free': gpu.memoryFree if hasattr(gpu, 'memoryFree') else (gpu.memoryTotal - gpu.memoryUsed),
                         'utilizationPercent': vram_utilization
                     },
-                    'utilization': float(f"{gpu.load * 100:.2f}"),
-                    'memory_utilization': float(f"{(gpu.memoryUsed / gpu.memoryTotal * 100):.2f}") if gpu.memoryTotal else 'N/A',
-                    'temperature': gpu.temperature,
+                    'utilization': float(f"{gpu.load * 100:.2f}") if gpu.load is not None else 0.0,
+                    'memory_utilization': vram_utilization,
+                    'temperature': gpu.temperature if hasattr(gpu, 'temperature') and gpu.temperature is not None else 'N/A',
                     'power': {
                         'draw': 'N/A',
                         'limit': 'N/A'
@@ -272,16 +275,312 @@ def get_gpu_details():
                     },
                     'driver_version': 'N/A'
                 })
-            log_debug("Collected GPU details", "GPU", gpu_details)
+            
+            log_debug("Collected GPU details using GPUtil", "GPU", gpu_details)
             return gpu_details
-        else:
-            log_info("No GPU detected via GPUtil.", "GPU")
-            return []  # Return an empty list if no GPU is detected
-    except Exception as e:
-        log_error(f"Error getting GPU details: {str(e)}", "GPU", {'stack': str(e)})
+        
+        # If GPUtil failed, try multiple fallbacks
+        
+        # Fallback 1: Try using subprocess to call lspci (Linux)
+        if platform.system() == 'Linux':
+            try:
+                import subprocess
+                import re
+                
+                # Get GPU info using lspci
+                lspci_output = subprocess.check_output('lspci | grep -E "VGA|3D|Display"', shell=True).decode('utf-8')
+                
+                if lspci_output:
+                    gpus_found = []
+                    for i, line in enumerate(lspci_output.strip().split('\n')):
+                        # Extract GPU model name from lspci output
+                        match = re.search(r'(?:VGA|3D|Display).*: (.*)', line)
+                        if match:
+                            gpu_model = match.group(1).strip()
+                            vendor = "Unknown"
+                            
+                            # Try to identify vendor
+                            if "nvidia" in gpu_model.lower():
+                                vendor = "NVIDIA"
+                            elif "amd" in gpu_model.lower() or "radeon" in gpu_model.lower():
+                                vendor = "AMD"
+                            elif "intel" in gpu_model.lower():
+                                vendor = "Intel"
+                            
+                            gpus_found.append({
+                                'index': i,
+                                'model': gpu_model,
+                                'vendor': vendor,
+                                'bus': line.split()[0],
+                                'vram': {
+                                    'total': 'N/A',
+                                    'used': 'N/A',
+                                    'free': 'N/A',
+                                    'utilizationPercent': None
+                                },
+                                'utilization': 'N/A',
+                                'memory_utilization': 'N/A',
+                                'temperature': 'N/A',
+                                'power': {
+                                    'draw': 'N/A',
+                                    'limit': 'N/A'
+                                },
+                                'clocks': {
+                                    'graphics': 'N/A',
+                                    'memory': 'N/A'
+                                },
+                                'driver_version': 'N/A'
+                            })
+                    
+                    if gpus_found:
+                        log_info(f"Detected {len(gpus_found)} GPUs via lspci", "GPU")
+                        return gpus_found
+            except Exception as e:
+                log_error(f"Failed to get Linux GPU info via lspci: {str(e)}", "GPU")
+        
+        # Fallback 2: Try using DirectX/WMI for Windows systems
+        elif platform.system() == 'Windows':
+            try:
+                import subprocess
+                result = subprocess.check_output(['wmic', 'path', 'win32_VideoController', 'get', 
+                                                'name,AdapterRAM,DriverVersion,VideoProcessor'], text=True)
+                
+                lines = [line.strip() for line in result.split('\n') if line.strip()]
+                if len(lines) > 1:  # First line is header
+                    headers = lines[0].lower()
+                    gpu_list = []
+                    
+                    for i, line in enumerate(lines[1:]):
+                        if not line.strip():
+                            continue
+                            
+                        # Extract any useful data
+                        name_match = re.search(r'([A-Za-z0-9].*?)\s+\d', line)
+                        ram_match = re.search(r'(\d+)', line)
+                        
+                        gpu_name = name_match.group(1).strip() if name_match else "Unknown GPU"
+                        
+                        # Determine vendor from GPU name
+                        vendor = "Unknown"
+                        if "nvidia" in gpu_name.lower():
+                            vendor = "NVIDIA"
+                        elif "amd" in gpu_name.lower() or "radeon" in gpu_name.lower():
+                            vendor = "AMD"
+                        elif "intel" in gpu_name.lower():
+                            vendor = "Intel"
+                        
+                        gpu_list.append({
+                            'index': i,
+                            'model': gpu_name,
+                            'vendor': vendor,
+                            'bus': 'N/A',
+                            'vram': {
+                                'total': int(ram_match.group(1)) if ram_match else 'N/A',
+                                'used': 'N/A',
+                                'free': 'N/A',
+                                'utilizationPercent': None
+                            },
+                            'utilization': 'N/A',
+                            'memory_utilization': 'N/A',
+                            'temperature': 'N/A',
+                            'power': {
+                                'draw': 'N/A',
+                                'limit': 'N/A'
+                            },
+                            'clocks': {
+                                'graphics': 'N/A',
+                                'memory': 'N/A'
+                            },
+                            'driver_version': 'N/A'
+                        })
+                    
+                    if gpu_list:
+                        log_info(f"Detected {len(gpu_list)} GPUs via wmic", "GPU")
+                        return gpu_list
+            except Exception as e:
+                log_error(f"Failed to get Windows GPU info: {str(e)}", "GPU")
+        
+        # Fallback 3: Try using system_profiler for macOS
+        elif platform.system() == 'Darwin':
+            try:
+                import subprocess
+                result = subprocess.check_output(['system_profiler', 'SPDisplaysDataType'], text=True)
+                
+                # Extract GPU info from system_profiler output
+                gpu_sections = re.findall(r'Chipset Model: (.*?)(?:Vendor|Memory|Bus|.*\n\s*$)', result, re.DOTALL)
+                
+                if gpu_sections:
+                    mac_gpus = []
+                    for i, section in enumerate(gpu_sections):
+                        lines = [line.strip() for line in section.split('\n')]
+                        model = lines[0].strip()
+                        
+                        # Try to extract VRAM if available
+                        vram_match = re.search(r'VRAM \(.*\): (\d+) ?(?:MB|GB)', result)
+                        vram = int(vram_match.group(1)) if vram_match else 'N/A'
+                        
+                        # Try to determine vendor from model name
+                        vendor = "Apple"
+                        if "amd" in model.lower() or "radeon" in model.lower():
+                            vendor = "AMD"
+                        elif "nvidia" in model.lower():
+                            vendor = "NVIDIA"
+                        elif "intel" in model.lower():
+                            vendor = "Intel"
+                        
+                        mac_gpus.append({
+                            'index': i,
+                            'model': model,
+                            'vendor': vendor,
+                            'bus': 'N/A',
+                            'vram': {
+                                'total': vram,
+                                'used': 'N/A',
+                                'free': 'N/A',
+                                'utilizationPercent': None
+                            },
+                            'utilization': 'N/A',
+                            'memory_utilization': 'N/A',
+                            'temperature': 'N/A',
+                            'power': {
+                                'draw': 'N/A',
+                                'limit': 'N/A'
+                            },
+                            'clocks': {
+                                'graphics': 'N/A',
+                                'memory': 'N/A'
+                            },
+                            'driver_version': 'N/A'
+                        })
+                    
+                    if mac_gpus:
+                        log_info(f"Detected {len(mac_gpus)} GPUs via system_profiler", "GPU")
+                        return mac_gpus
+            except Exception as e:
+                log_error(f"Failed to get macOS GPU info: {str(e)}", "GPU")
+        
+        # Fallback 4: Try using the py3nvml library for NVIDIA GPUs
+        try:
+            import py3nvml.py3nvml as nvml
+            nvml.nvmlInit()
+            device_count = nvml.nvmlDeviceGetCount()
+            
+            if device_count > 0:
+                nvidia_gpus = []
+                for i in range(device_count):
+                    handle = nvml.nvmlDeviceGetHandleByIndex(i)
+                    info = nvml.nvmlDeviceGetMemoryInfo(handle)
+                    name = nvml.nvmlDeviceGetName(handle)
+                    temp = nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
+                    util = nvml.nvmlDeviceGetUtilizationRates(handle)
+                    
+                    if isinstance(name, bytes):
+                        name = name.decode('utf-8')
+                    
+                    nvidia_gpus.append({
+                        'index': i,
+                        'model': name,
+                        'vendor': 'NVIDIA',
+                        'bus': 'N/A',
+                        'vram': {
+                            'total': info.total,
+                            'used': info.used,
+                            'free': info.free,
+                            'utilizationPercent': float(f"{(info.used / info.total * 100):.2f}") if info.total > 0 else None
+                        },
+                        'utilization': float(f"{util.gpu:.2f}") if hasattr(util, 'gpu') else 'N/A',
+                        'memory_utilization': float(f"{util.memory:.2f}") if hasattr(util, 'memory') else 'N/A',
+                        'temperature': temp,
+                        'power': {
+                            'draw': 'N/A',
+                            'limit': 'N/A'
+                        },
+                        'clocks': {
+                            'graphics': 'N/A',
+                            'memory': 'N/A'
+                        },
+                        'driver_version': nvml.nvmlSystemGetDriverVersion().decode('utf-8') if hasattr(nvml, 'nvmlSystemGetDriverVersion') else 'N/A'
+                    })
+                
+                nvml.nvmlShutdown()
+                log_info(f"Detected {len(nvidia_gpus)} NVIDIA GPUs via py3nvml", "GPU")
+                return nvidia_gpus
+            nvml.nvmlShutdown()
+        except:
+            # py3nvml might not be installed or failed, continue with other fallbacks
+            pass
+        
+        # Final fallback: Try using subprocess to directly mimic what the JavaScript version does
+        try:
+            import subprocess
+            import json
+            
+            # Create a temporary script to use systeminformation-like approach
+            temp_script = """
+            const si = require('systeminformation');
+            si.graphics().then(data => {
+                console.log(JSON.stringify(data));
+            });
+            """
+            
+            # Write the script to a temp file
+            with open('temp_gpu_check.js', 'w') as f:
+                f.write(temp_script)
+            
+            # Execute with Node.js if available
+            try:
+                result = subprocess.check_output(['node', 'temp_gpu_check.js'], text=True)
+                os.remove('temp_gpu_check.js')  # Clean up
+                
+                data = json.loads(result)
+                if data and 'controllers' in data and len(data['controllers']) > 0:
+                    node_gpus = []
+                    for i, gpu in enumerate(data['controllers']):
+                        vram_utilization = None
+                        if gpu.get('memoryTotal') and gpu.get('memoryUsed'):
+                            vram_utilization = float(f"{(gpu['memoryUsed'] / gpu['memoryTotal'] * 100):.2f}")
+                        
+                        node_gpus.append({
+                            'index': i,
+                            'model': gpu.get('model', 'Unknown'),
+                            'vendor': gpu.get('vendor', 'Unknown'),
+                            'bus': gpu.get('bus', 'N/A'),
+                            'vram': {
+                                'total': gpu.get('memoryTotal', 'N/A'),
+                                'used': gpu.get('memoryUsed', 'N/A'),
+                                'free': gpu.get('memoryFree', 'N/A'),
+                                'utilizationPercent': vram_utilization
+                            },
+                            'utilization': gpu.get('utilizationGpu', 'N/A'),
+                            'memory_utilization': gpu.get('utilizationMemory', 'N/A'),
+                            'temperature': gpu.get('temperatureGpu', 'N/A'),
+                            'power': {
+                                'draw': gpu.get('powerDraw', 'N/A'),
+                                'limit': gpu.get('powerLimit', 'N/A')
+                            },
+                            'clocks': {
+                                'graphics': gpu.get('clockCore', 'N/A'),
+                                'memory': gpu.get('clockMemory', 'N/A')
+                            },
+                            'driver_version': gpu.get('driverVersion', 'N/A')
+                        })
+                    
+                    log_info(f"Detected {len(node_gpus)} GPUs via Node.js systeminformation", "GPU")
+                    return node_gpus
+            except Exception as node_err:
+                log_error(f"Failed to get GPU info via Node.js: {str(node_err)}", "GPU")
+                # Clean up temp file if it exists
+                if os.path.exists('temp_gpu_check.js'):
+                    os.remove('temp_gpu_check.js')
+        except Exception as e:
+            log_error(f"Final fallback failed: {str(e)}", "GPU")
+        
+        log_info("No GPU detected after trying all fallback methods", "GPU")
         return []
-
-
+    except Exception as e:
+        log_error(f"Error in GPU detection: {str(e)}", "GPU", {'stack': str(e)})
+        return []
+        
 def get_processes():
     try:
         processes = []

@@ -5,3 +5,4 @@ psutil==5.9.5
 python-dotenv==1.0.0
 eventlet==0.33.3
 GPUtil==1.4.0
+py3nvml==0.2.7
